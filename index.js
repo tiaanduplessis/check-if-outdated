@@ -28,11 +28,12 @@ module.exports = function (...dependencies) {
   const pkg = require(filePath)
   const pkgDependencies = dependencyInfo(pkg)
 
-  dependencies.forEach((dependency) => {
+  for (let i = 0; i < dependencies.length; i++) {
+    const dependency = dependencies[i]
     if (!pkgDependencies[dependency]) {
       return Promise.reject(new Error(`${dependency} is not listed as a dependency in your package.json`))
     }
-  })
+  }
 
   return Promise.all(
     dependencies.map((dependency) => packageJson(dependency))
