@@ -40,7 +40,7 @@
     "check-if-outdated"
   ],
   "dependencies": {
-    "package-json": "^5.0.0",
+    "package-json": "^6.3.0",
     "pkg-up": "^2.0.0"
   },
   "devDependencies": {
