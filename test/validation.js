@@ -41,12 +41,8 @@ function runChild (root, fixture, config) {
   }
 
   process.chdir(fixture)
-  if (config.cli) {
-    const cli = path.join(root, 'cli.js')
-    process.argv = [process.execPath, cli].concat(config.args)
-    require(cli)
-    return
-  }
+  // When preloaded with -r, Node runs the real CLI after the stubs are ready.
+  if (config.cli) return
 
   try {
     const check = require(root)
@@ -126,27 +122,32 @@ function runTests (root) {
   })
 
   function cliError (message, calls) {
-    return (report, output) => {
+    return (report, child) => {
       assert.deepEqual(report.calls, calls)
-      assert.notStrictEqual(output.indexOf('Error: ' + message), -1)
-      assert.strictEqual(output.indexOf('Fixture metadata'), -1)
+      assert.strictEqual(child.status, 1, 'CLI errors must signal failure')
+      assert.strictEqual(child.stdout, '', 'CLI errors must not pollute stdout')
+      assert.notStrictEqual(child.stderr.indexOf('Error: ' + message), -1)
+      assert.strictEqual(child.stderr.indexOf('Fixture metadata'), -1)
     }
   }
 
-  add('CLI catches invalid dependency', { cli: true, args: ['missing'] }, cliError(missing('missing'), []))
-  add('CLI catches mixed arguments before any requests', { cli: true, args: ['prod', 'missing'] }, cliError(missing('missing'), []))
-  add('CLI catches missing package file', { cli: true, args: ['prod'], noPackage: true }, cliError('No package.json found.', []))
-  add('CLI catches registry rejection', { cli: true, args: ['prod'], registryError: true }, cliError('Fixture registry failure', ['prod']))
-  add('CLI prints valid results', { cli: true, args: ['prod'] }, (report, output) => {
+  add('CLI catches invalid dependency', { cli: true, args: ['missing'], exitCode: 1 }, cliError(missing('missing'), []))
+  add('CLI catches mixed arguments before any requests', { cli: true, args: ['prod', 'missing'], exitCode: 1 }, cliError(missing('missing'), []))
+  add('CLI catches invalid then valid arguments', { cli: true, args: ['missing', 'prod'], exitCode: 1 }, cliError(missing('missing'), []))
+  add('CLI reports the first invalid argument', { cli: true, args: ['missing', 'other'], exitCode: 1 }, cliError(missing('missing'), []))
+  add('CLI catches missing package file', { cli: true, args: ['prod'], noPackage: true, exitCode: 1 }, cliError('No package.json found.', []))
+  add('CLI catches missing package file without arguments', { cli: true, args: [], noPackage: true, exitCode: 1 }, cliError('No package.json found.', []))
+  add('CLI catches registry rejection', { cli: true, args: ['prod'], registryError: true, exitCode: 1 }, cliError('Fixture registry failure', ['prod']))
+  add('CLI prints valid results', { cli: true, args: ['prod'] }, (report, child) => {
     assert.deepEqual(report.calls, ['prod'])
     ;['currentVersion', '~2.0.0', 'newVersion', '9.8.7', 'prod', 'Fixture metadata'].forEach((value) => {
-      assert.notStrictEqual(output.indexOf(value), -1)
+      assert.notStrictEqual(child.stdout.indexOf(value), -1)
     })
-    assert.strictEqual(output.indexOf('Error:'), -1)
+    assert.strictEqual(child.stdout.indexOf('Error:'), -1)
   })
-  add('CLI prints empty result without requests', { cli: true, args: [] }, (report, output) => {
+  add('CLI prints empty result without requests', { cli: true, args: [] }, (report, child) => {
     assert.deepEqual(report.calls, [])
-    assert.strictEqual(output.trim(), '[]')
+    assert.strictEqual(child.stdout.trim(), '[]')
   })
 
   let failed = 0
@@ -155,17 +156,24 @@ function runTests (root) {
     fs.mkdirSync(fixture)
     fs.writeFileSync(path.join(fixture, 'package.json'), JSON.stringify(packageFixture))
     try {
-      const child = childProcess.spawnSync(process.execPath, [__filename, '--child', root, fixture, JSON.stringify(item.config)], {
-        encoding: 'utf8', timeout: 5000
+      const args = item.config.cli
+        ? ['-r', __filename, path.join(root, 'cli.js')].concat(item.config.args)
+        : [__filename, '--child', root, fixture, JSON.stringify(item.config)]
+      const env = Object.assign({}, process.env)
+      if (item.config.cli) {
+        env.CHECK_IF_OUTDATED_VALIDATION = JSON.stringify({ root, fixture, config: item.config })
+      }
+      const child = childProcess.spawnSync(process.execPath, args, {
+        encoding: 'utf8', timeout: 5000, env
       })
       assert.ifError(child.error)
       assert.strictEqual(child.signal, null)
-      assert.strictEqual(child.status, 0, child.stderr)
-      assert.strictEqual(child.stderr, '')
+      assert.strictEqual(child.status, item.config.exitCode || 0, child.stderr)
+      if (!item.config.exitCode) assert.strictEqual(child.stderr, '')
       const report = JSON.parse(fs.readFileSync(path.join(fixture, 'report.json'), 'utf8'))
       assert.strictEqual(report.networkAttempts, 0, 'no network is allowed')
       assert.deepEqual(report.unhandled, [], 'must not create unhandled rejections')
-      item.verify(report, child.stdout)
+      item.verify(report, child)
       console.log('PASS ' + item.name)
     } catch (error) {
       failed++
@@ -179,7 +187,11 @@ function runTests (root) {
   if (failed) process.exitCode = 1
 }
 
-if (process.argv[2] === '--child') {
+if (process.env.CHECK_IF_OUTDATED_VALIDATION) {
+  const input = JSON.parse(process.env.CHECK_IF_OUTDATED_VALIDATION)
+  delete process.env.CHECK_IF_OUTDATED_VALIDATION
+  runChild(input.root, input.fixture, input.config)
+} else if (process.argv[2] === '--child') {
   runChild(process.argv[3], process.argv[4], JSON.parse(process.argv[5]))
 } else {
   runTests(path.resolve(process.argv[2] || path.join(__dirname, '..')))
